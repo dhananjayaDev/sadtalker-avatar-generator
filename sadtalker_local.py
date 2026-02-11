@@ -256,12 +256,12 @@ with gr.Blocks() as demo:
     - Check logs for detailed progress
     """)
 
-# Launch
+# Launch (no theme= so it works on Colab's older Gradio too)
 if __name__ == "__main__":
+    share = "--share" in sys.argv
     demo.launch(
         debug=True,
-        share=False,  # Set to True if you want a public link
-        server_name="127.0.0.1",  # Localhost
+        share=share,
+        server_name="127.0.0.1",
         server_port=7860,
-        theme=gr.themes.Soft()  # Theme moved here for Gradio 6.0+
     )

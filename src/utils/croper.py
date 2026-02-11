@@ -16,29 +16,101 @@ from facexlib.alignment import landmark_98_to_68
 import numpy as np
 from PIL import Image
 
+# Optional: 1adrianb/face-alignment returns 68 points directly (no 98->68 conversion)
+_FACE_ALIGNMENT = None
+
+def _get_face_alignment(device='cuda'):
+    """Lazy-init face_alignment.FaceAlignment (68 landmarks, TWO_D)."""
+    global _FACE_ALIGNMENT
+    if _FACE_ALIGNMENT is None:
+        try:
+            import face_alignment
+            LandmarksType = face_alignment.LandmarksType
+            # TWO_D or _2D depending on package version
+            lm_type = getattr(LandmarksType, 'TWO_D', getattr(LandmarksType, '_2D', 1))
+            fa_device = 'cpu' if device == 'cpu' else 'cuda'
+            _FACE_ALIGNMENT = face_alignment.FaceAlignment(
+                lm_type, device=fa_device, face_detector='sfd'
+            )
+        except Exception:
+            _FACE_ALIGNMENT = False
+    return _FACE_ALIGNMENT if _FACE_ALIGNMENT is not None and _FACE_ALIGNMENT is not False else None
+
+
 class Preprocesser:
     def __init__(self, device='cuda'):
         self.predictor = KeypointExtractor(device)
+        self.device = device
+
+    def _get_landmark_face_alignment(self, img_np, det):
+        """Fallback: use 1adrianb/face-alignment to get 68 landmarks on crop (no 98->68)."""
+        fa = _get_face_alignment(self.device)
+        if fa is None:
+            return None
+        try:
+            img = img_np[int(det[1]):int(det[3]), int(det[0]):int(det[2]), :]
+            if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+                return None
+            # face_alignment expects RGB; get_landmarks returns list of (68, 2) or (68, 3)
+            preds = fa.get_landmarks(img)
+            if not preds or len(preds) == 0:
+                return None
+            lm = np.array(preds[0], dtype=np.float64)
+            if lm.ndim == 2 and lm.shape[0] == 68:
+                lm = lm[:, :2]
+            else:
+                return None
+            lm[:, 0] += int(det[0])
+            lm[:, 1] += int(det[1])
+            return lm
+        except Exception:
+            return None
 
     def get_landmark(self, img_np):
-        """get landmark with dlib
-        :return: np.array shape=(68, 2)
-        """
-        with torch.no_grad():
-            dets = self.predictor.det_net.detect_faces(img_np, 0.97)
+        """Get 68 facial landmarks. Uses facexlib 98->68; fallback: face_alignment (68 directly)."""
+        try:
+            with torch.no_grad():
+                dets = self.predictor.det_net.detect_faces(img_np, 0.97)
 
-        if len(dets) == 0:
+            if len(dets) == 0:
+                return None
+            det = dets[0]
+
+            if det[2] <= det[0] or det[3] <= det[1]:
+                return None
+
+            img = img_np[int(det[1]):int(det[3]), int(det[0]):int(det[2]), :]
+            if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+                return None
+
+            lm = None
+
+            # Primary: facexlib 98 -> landmark_98_to_68 -> 68
+            try:
+                landmarks_98 = self.predictor.detector.get_landmarks(img)
+                if landmarks_98 is not None:
+                    if isinstance(landmarks_98, list) and len(landmarks_98) > 0:
+                        landmarks_98 = landmarks_98[0]
+                    if isinstance(landmarks_98, np.ndarray) and landmarks_98.shape[0] == 98 and landmarks_98.shape[1] == 2:
+                        lm = landmark_98_to_68(landmarks_98)
+                    elif not isinstance(landmarks_98, np.ndarray):
+                        arr = np.asarray(landmarks_98, dtype=np.float64)
+                        if arr.shape[0] == 98 and arr.shape[1] == 2:
+                            lm = landmark_98_to_68(arr)
+            except Exception:
+                pass
+
+            if lm is not None and isinstance(lm, np.ndarray) and lm.shape[0] == 68 and lm.shape[1] == 2:
+                lm[:, 0] += int(det[0])
+                lm[:, 1] += int(det[1])
+                return lm
+
+            # Fallback: face_alignment (68 landmarks directly)
+            lm = self._get_landmark_face_alignment(img_np, det)
+            return lm
+
+        except Exception:
             return None
-        det = dets[0]
-
-        img = img_np[int(det[1]):int(det[3]), int(det[0]):int(det[2]), :]
-        lm = landmark_98_to_68(self.predictor.detector.get_landmarks(img)) # [0]
-
-        #### keypoints to the original location
-        lm[:,0] += int(det[0])
-        lm[:,1] += int(det[1])
-
-        return lm
 
     def align_face(self, img, lm, output_size=1024):
         """

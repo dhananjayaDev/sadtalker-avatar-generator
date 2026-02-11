@@ -241,8 +241,13 @@ class AnimateFromCoeff():
 
             try:
                 enhanced_images_gen_with_len = enhancer_generator_with_len(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
-                imageio.mimsave(enhanced_path, enhanced_images_gen_with_len, fps=float(25))
-            except:
+                # imageio.mimsave requires a sequence (list), not a generator
+                enhanced_list = list(enhanced_images_gen_with_len)
+                imageio.mimsave(enhanced_path, enhanced_list, fps=float(25))
+            except Exception as e:
+                # Fallback: avoid loading full video again if low memory; re-raise OOM
+                if 'memory' in str(e).lower() or 'Insufficient' in str(e) or 'allocate' in str(e).lower():
+                    raise
                 enhanced_images_gen_with_len = enhancer_list(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
                 imageio.mimsave(enhanced_path, enhanced_images_gen_with_len, fps=float(25))
             
