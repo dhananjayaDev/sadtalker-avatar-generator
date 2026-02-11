@@ -116,6 +116,20 @@ PHONEME_TO_VISEME = {
 VISEME_TYPES = ['A', 'E', 'I', 'O', 'U', 'M', 'F', 'W', 'T']  # 9 basic visemes
 BLINK_VISEME = 'BLINK'  # Special viseme for eye blinks
 
+# SadTalker-style blink: same 5-frame curve as generate_batch.generate_blink_seq_randomly
+BLINK_CURVE = [0.5, 0.9, 1.0, 0.9, 0.5]  # smooth close -> open
+BLINK_DURATION_FRAMES = len(BLINK_CURVE)
+# Random blink timing (more natural than fixed intervals). At 25 fps: 48 = ~2s, 150 = ~6s.
+BLINK_INTERVAL_MIN_FRAMES = 48   # min frames between blink starts
+BLINK_INTERVAL_MAX_FRAMES = 175  # max frames between blink starts
+BLINK_JITTER_FRAMES = 12        # ± random jitter on each blink time (breaks rigid timing)
+# Eye region as fraction of face bbox (tune if blink misaligns or is invisible)
+EYE_FACE_TOP = 0.20   # start of eye strip from top of face
+EYE_FACE_BOTTOM = 0.48 # end of eye strip (covers eyes + lids)
+EYE_FACE_LEFT = 0.08
+EYE_FACE_RIGHT = 0.92
+EYE_VERTICAL_NUDGE = 0  # add to top/bottom (e.g. 0.02 = 2% face height down)
+
 
 def text_to_phonemes_simple(text: str):
     """
@@ -827,9 +841,35 @@ def regenerate_mouth_regions():
     return regenerated, f"✅ Regenerated {regenerated}/{len(VISEME_TYPES)} mouth region files"
 
 
-def blend_blink_onto_face(base_face, blink_frame, face_cache):
-    """Blend blink frame (closed eyes) onto base face image."""
-    if blink_frame is None or blink_frame.size == 0:
+def generate_blink_ratio_sadtalker_style(num_frames):
+    """
+    Random blink timing: variable intervals + jitter so blinks feel natural, not on a fixed grid.
+    Returns array of shape (num_frames,) with values in [0, 0.5, 0.9, 1.0] for blend strength.
+    """
+    ratio = np.zeros(num_frames, dtype=np.float32)
+    if num_frames <= 30:
+        return ratio
+    # First blink: random start in early part of clip (so not always at same time)
+    interval_min = min(BLINK_INTERVAL_MIN_FRAMES, num_frames // 4)
+    interval_max = min(BLINK_INTERVAL_MAX_FRAMES, num_frames // 2)
+    if interval_max <= interval_min:
+        interval_max = interval_min + 20
+    next_blink_at = random.randint(interval_min // 2, min(interval_max, num_frames - BLINK_DURATION_FRAMES - 5))
+    while next_blink_at + BLINK_DURATION_FRAMES < num_frames:
+        for i, val in enumerate(BLINK_CURVE):
+            idx = next_blink_at + i
+            if 0 <= idx < num_frames:
+                ratio[idx] = val
+        # Next blink: random interval + jitter (different each time)
+        gap = random.randint(interval_min, interval_max)
+        jitter = random.randint(-BLINK_JITTER_FRAMES, BLINK_JITTER_FRAMES)
+        next_blink_at += BLINK_DURATION_FRAMES + max(10, gap + jitter)
+    return ratio
+
+
+def blend_blink_onto_face(base_face, blink_frame, face_cache, blend_strength=1.0):
+    """Blend blink frame (closed eyes) onto base face. blend_strength in [0,1] for SadTalker curve."""
+    if blink_frame is None or blink_frame.size == 0 or blend_strength <= 0:
         return base_face.copy()
     
     h, w = base_face.shape[:2]
@@ -848,27 +888,24 @@ def blend_blink_onto_face(base_face, blink_frame, face_cache):
         ox1, oy1 = max(0, ox1), max(0, oy1)
         ox2, oy2 = min(w, ox2), min(h, oy2)
         
-        # Eye region is upper 20-45% of face (from top of face) - more accurate positioning
+        # Eye region: narrow strip aligned to eyelids (tune EYE_FACE_* if misaligned)
         face_h = oy2 - oy1
         face_w = ox2 - ox1
-        
-        eye_y1 = oy1 + int(face_h * 0.20)  # Start at 20% down the face (eyes are higher)
-        eye_y2 = oy1 + int(face_h * 0.45)  # End at 45% down the face
-        eye_x1 = ox1 + int(face_w * 0.10)  # Start at 10% from left (wider eye region)
-        eye_x2 = ox1 + int(face_w * 0.90)  # End at 90% from left
-        
-        # Ensure eye coordinates are within image bounds
+        nudge = int(face_h * EYE_VERTICAL_NUDGE)
+        eye_y1 = oy1 + int(face_h * EYE_FACE_TOP) + nudge
+        eye_y2 = oy1 + int(face_h * EYE_FACE_BOTTOM) + nudge
+        eye_x1 = ox1 + int(face_w * EYE_FACE_LEFT)
+        eye_x2 = ox1 + int(face_w * EYE_FACE_RIGHT)
         eye_y1, eye_x1 = max(0, eye_y1), max(0, eye_x1)
         eye_y2, eye_x2 = min(h, eye_y2), min(w, eye_x2)
     else:
-        # Fallback: assume face crop (eyes are higher up)
-        eye_y1, eye_y2 = int(h * 0.20), int(h * 0.45)
-        eye_x1, eye_x2 = int(w * 0.10), int(w * 0.90)
-        
-        eye_y1 = max(0, eye_y1)
-        eye_y2 = min(h, eye_y2)
-        eye_x1 = max(0, eye_x1)
-        eye_x2 = min(w, eye_x2)
+        # Fallback: assume full image is face crop
+        eye_y1 = int(h * EYE_FACE_TOP)
+        eye_y2 = int(h * EYE_FACE_BOTTOM)
+        eye_x1 = int(w * EYE_FACE_LEFT)
+        eye_x2 = int(w * EYE_FACE_RIGHT)
+        eye_y1, eye_x1 = max(0, eye_y1), max(0, eye_x1)
+        eye_y2, eye_x2 = min(h, eye_y2), min(w, eye_x2)
     
     eye_h = eye_y2 - eye_y1
     eye_w = eye_x2 - eye_x1
@@ -880,26 +917,25 @@ def blend_blink_onto_face(base_face, blink_frame, face_cache):
     blink_resized = cv2.resize(blink_frame, (w, h))
     eye_region_blink = blink_resized[eye_y1:eye_y2, eye_x1:eye_x2]
     
-    # Create mask for blending (feather edges)
+    # Mask: full strength over eye region, feathered at edges only (so blink is visible)
     mask = np.ones((eye_h, eye_w), dtype=np.float32)
-    feather = min(10, eye_h // 3, eye_w // 3)
-    
+    feather = min(12, eye_h // 3, eye_w // 3)
     for i in range(feather):
         alpha = i / max(feather, 1)
         if i < eye_h:
             mask[i, :] *= alpha
-            mask[-i-1, :] *= alpha
+            mask[-i - 1, :] *= alpha
         if i < eye_w:
             mask[:, i] *= alpha
-            mask[:, -i-1] *= alpha
-    
+            mask[:, -i - 1] *= alpha
     mask_3d = np.stack([mask] * 3, axis=2)
     
-    # Blend eye region (strong blend for visible blink)
+    # Blend eye region; blend_strength from SadTalker curve (0.5, 0.9, 1.0, 0.9, 0.5)
     result = base_face.copy()
     eye_region = result[eye_y1:eye_y2, eye_x1:eye_x2].astype(np.float32)
     
-    blend_ratio = 0.85  # Strong blend for visible blink
+    base_blend = 0.95  # Max strength when fully closed (visible blink)
+    blend_ratio = base_blend * min(1.0, max(0.0, float(blend_strength)))
     blended = (eye_region * (1 - mask_3d * blend_ratio) + 
                eye_region_blink.astype(np.float32) * mask_3d * blend_ratio).astype(np.uint8)
     
@@ -1184,11 +1220,11 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     last_viseme = None
     viseme_changes = []
     
-    # Blink timing: first blink early (0.5-1.5s), then every 2-4 seconds
-    next_blink_frame = random.randint(int(fps * 0.5), int(fps * 1.5))  # First blink at 0.5-1.5s
-    blink_duration_frames = 4  # Blink lasts 4 frames (~0.16s at 25fps) for visibility
-    is_blinking = False
-    blink_start_frame = 0
+    # SadTalker-style blink: same 5-frame curve and random timing as generate_blink_seq_randomly
+    blink_ratio_per_frame = generate_blink_ratio_sadtalker_style(total_frames)
+    blink_count = int(np.sum(blink_ratio_per_frame > 0) // BLINK_DURATION_FRAMES)
+    if blink_frame is not None and blink_count > 0:
+        print(f"✓ Blink schedule: {blink_count} blinks (5-frame curve)")
     
     for frame_idx in range(total_frames):
         # Calculate current time in seconds
@@ -1220,18 +1256,6 @@ def compose_live_video_streaming(text: str, fps: int = 25):
         else:
             # No visemes available, use default (closed mouth for neutral)
             current_viseme = 'M'  # Default to closed mouth instead of 'A'
-        
-        # Check if we should blink (random timing)
-        if blink_frame is not None:
-            if frame_idx >= next_blink_frame and not is_blinking:
-                # Start blink
-                is_blinking = True
-                blink_start_frame = frame_idx
-                # Next blink in 2-4 seconds
-                next_blink_frame = frame_idx + blink_duration_frames + random.randint(int(fps * 2), int(fps * 4))
-            elif is_blinking and (frame_idx - blink_start_frame) >= blink_duration_frames:
-                # End blink
-                is_blinking = False
         
         # Blend mouth from viseme onto base face
         # During silence, use 'M' (closed mouth) viseme
@@ -1288,9 +1312,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
         if not viseme_applied and 'M' in mouth_library:
             frame = blend_mouth_onto_face(frame, mouth_library['M'], face_cache)
         
-        # Apply blink overlay if blinking
-        if is_blinking and blink_frame is not None:
-            frame = blend_blink_onto_face(frame, blink_frame, face_cache)
+        # Apply blink overlay with SadTalker-style curve (smooth 5-frame strength)
+        if blink_frame is not None and frame_idx < len(blink_ratio_per_frame) and blink_ratio_per_frame[frame_idx] > 0:
+            frame = blend_blink_onto_face(frame, blink_frame, face_cache, blend_strength=blink_ratio_per_frame[frame_idx])
         
         out.write(frame)
         
