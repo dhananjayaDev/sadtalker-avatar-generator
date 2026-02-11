@@ -982,9 +982,9 @@ def blend_mouth_onto_face(base_face, viseme_mouth, face_cache):
     result = base_face.copy()
     mouth_region = result[mouth_y1:mouth_y2, mouth_x1:mouth_x2].astype(np.float32)
     
-    # Use very strong blend (92% viseme, 8% base) for highly visible, realistic lip movement
-    # Higher blend ratio = more pronounced mouth movements
-    blend_ratio = 0.92
+    # Subtle blend (65% viseme, 35% base) for natural-looking lip movement
+    # Lower ratio = less exaggerated, more natural speech
+    blend_ratio = 0.65
     
     # Blend with slight color enhancement for more visible changes
     viseme_mouth_float = viseme_mouth_resized.astype(np.float32)
@@ -1068,13 +1068,12 @@ def compose_live_video_streaming(text: str, fps: int = 25):
             visemes_merged.append(v)
     
     if visemes_merged and len(visemes_merged) > 0:
-        # Use fewer frames per viseme for faster, more realistic changes
-        # Each viseme gets 1-2 frames minimum, but distribute evenly
-        frames_per_viseme = max(1, total_frames // len(visemes_merged))
-        # Cap at 3 frames max per viseme for faster transitions
-        frames_per_viseme = min(frames_per_viseme, 3)
+        # More frames per viseme = slower, smoother, more natural transitions
+        frames_per_viseme = max(5, total_frames // len(visemes_merged))
+        # Cap at 8 frames per viseme so changes aren't too jumpy
+        frames_per_viseme = min(frames_per_viseme, 8)
     else:
-        frames_per_viseme = max(2, total_frames // max(len(visemes), 1))
+        frames_per_viseme = max(5, total_frames // max(len(visemes), 1))
     
     # Step 4: Load base face and viseme mouths
     base_image = cv2.imread(face_cache['image_path'])
@@ -1108,13 +1107,16 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     
     # Load blink frame (after we know image dimensions)
     blink_frame = None
-    if BLINK_VISEME in viseme_library:
-        blink_path = viseme_library[BLINK_VISEME]
-        if os.path.exists(blink_path):
-            blink_frame = cv2.imread(blink_path)
-            if blink_frame is not None:
-                blink_frame = cv2.resize(blink_frame, (w, h))
-                print(f"✓ Blink frame loaded")
+    blink_path = viseme_library.get(BLINK_VISEME) if viseme_library else None
+    if not blink_path or not os.path.exists(blink_path):
+        blink_path = os.path.join(VISEME_DIR, f"viseme_{BLINK_VISEME}.png")  # Fallback: load from disk
+    if blink_path and os.path.exists(blink_path):
+        blink_frame = cv2.imread(blink_path)
+        if blink_frame is not None:
+            blink_frame = cv2.resize(blink_frame, (w, h))
+            print(f"✓ Blink frame loaded")
+    if blink_frame is None:
+        print(f"⚠ Blink frame not found. Regenerate Viseme Library in Setup for eye blinks.")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     temp_video = os.path.join(gen_dir, "temp_video.mp4")
     out = cv2.VideoWriter(temp_video, fourcc, fps, (w, h))
@@ -1182,10 +1184,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     last_viseme = None
     viseme_changes = []
     
-    # Blink timing: random blinks every 2-4 seconds (natural blink rate)
-    blink_interval_frames = random.randint(int(fps * 2), int(fps * 4))  # 2-4 seconds
-    next_blink_frame = blink_interval_frames
-    blink_duration_frames = 3  # Blink lasts 3 frames (~0.12s at 25fps)
+    # Blink timing: first blink early (0.5-1.5s), then every 2-4 seconds
+    next_blink_frame = random.randint(int(fps * 0.5), int(fps * 1.5))  # First blink at 0.5-1.5s
+    blink_duration_frames = 4  # Blink lasts 4 frames (~0.16s at 25fps) for visibility
     is_blinking = False
     blink_start_frame = 0
     
@@ -1226,7 +1227,8 @@ def compose_live_video_streaming(text: str, fps: int = 25):
                 # Start blink
                 is_blinking = True
                 blink_start_frame = frame_idx
-                next_blink_frame = frame_idx + random.randint(int(fps * 2), int(fps * 4))
+                # Next blink in 2-4 seconds
+                next_blink_frame = frame_idx + blink_duration_frames + random.randint(int(fps * 2), int(fps * 4))
             elif is_blinking and (frame_idx - blink_start_frame) >= blink_duration_frames:
                 # End blink
                 is_blinking = False

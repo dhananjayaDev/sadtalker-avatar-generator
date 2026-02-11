@@ -6,6 +6,8 @@ This document compares the five different SadTalker implementations, each optimi
 
 ---
 
+###Visemes are the visual representations of phonemes (speech sounds)
+
 ## Quick Comparison Table
 
 | Feature | sadtalker_local | sadtalker_optimized_local | faster | cunning | live |
