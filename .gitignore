@@ -164,6 +164,7 @@ gfpgan/*
 checkpoints/*
 assets/*
 results/*
+cache/*
 Dockerfile
 start_docker.sh
 start.sh
