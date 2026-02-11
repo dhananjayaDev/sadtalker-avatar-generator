@@ -25,6 +25,7 @@ from pydub import AudioSegment
 from collections import defaultdict
 import json
 import time
+import random
 from threading import Thread
 import queue
 
@@ -113,6 +114,7 @@ PHONEME_TO_VISEME = {
 
 # Viseme types (mouth shapes we need to pre-render)
 VISEME_TYPES = ['A', 'E', 'I', 'O', 'U', 'M', 'F', 'W', 'T']  # 9 basic visemes
+BLINK_VISEME = 'BLINK'  # Special viseme for eye blinks
 
 
 def text_to_phonemes_simple(text: str):
@@ -161,29 +163,29 @@ def text_to_phonemes_simple(text: str):
         
         # Vowels
         if char == 'A':
-            if next_char == 'E' or next_char == 'Y':
+            if next_char and (next_char == 'E' or next_char == 'Y'):
                 return ['EY']
-            elif next_char == 'I':
+            elif next_char and next_char == 'I':
                 return ['EY']
             return ['AE']
         if char == 'E':
-            if next_char == 'E':
+            if next_char and next_char == 'E':
                 return ['IY']
-            elif prev_char == 'I':
+            elif prev_char and prev_char == 'I':
                 return []
             return ['EH']
         if char == 'I':
-            if next_char == 'E' or next_char == 'G' or next_char == 'H':
+            if next_char and (next_char == 'E' or next_char == 'G' or next_char == 'H'):
                 return ['AY']
             return ['IH']
         if char == 'O':
-            if next_char == 'O':
+            if next_char and next_char == 'O':
                 return ['UW']
-            elif next_char == 'W':
+            elif next_char and next_char == 'W':
                 return ['OW']
             return ['AO']
         if char == 'U':
-            if prev_char == 'Q':
+            if prev_char and prev_char == 'Q':
                 return ['W']
             return ['UH']
         
@@ -191,21 +193,21 @@ def text_to_phonemes_simple(text: str):
         if char == 'B':
             return ['B']
         if char == 'C':
-            if next_char == 'H':
+            if next_char and next_char == 'H':
                 return ['CH']
-            elif next_char in 'EIY':
+            elif next_char and next_char in 'EIY':
                 return ['S']
             return ['K']
         if char == 'D':
-            if next_char == 'G':
+            if next_char and next_char == 'G':
                 return []
             return ['D']
         if char == 'F':
             return ['F']
         if char == 'G':
-            if next_char == 'H':
+            if next_char and next_char == 'H':
                 return []
-            elif next_char in 'EIY':
+            elif next_char and next_char in 'EIY':
                 return ['JH']
             return ['G']
         if char == 'H':
@@ -227,11 +229,11 @@ def text_to_phonemes_simple(text: str):
         if char == 'R':
             return ['R']
         if char == 'S':
-            if next_char == 'H':
+            if next_char and next_char == 'H':
                 return ['SH']
             return ['S']
         if char == 'T':
-            if next_char == 'H':
+            if next_char and next_char == 'H':
                 return ['TH']
             return ['T']
         if char == 'V':
@@ -241,7 +243,7 @@ def text_to_phonemes_simple(text: str):
         if char == 'X':
             return ['K', 'S']
         if char == 'Y':
-            if prev_char in 'AEIOU':
+            if prev_char and prev_char in 'AEIOU':
                 return []
             return ['Y']
         if char == 'Z':
@@ -315,9 +317,67 @@ def phonemes_to_visemes(phonemes: list):
     visemes = []
     for phoneme in phonemes:
         # Map phoneme to viseme
-        viseme = PHONEME_TO_VISEME.get(phoneme.upper(), 'A')
+        # 'SP' (space/silence) maps to 'M' (closed mouth) for resting position
+        if phoneme.upper() == 'SP' or phoneme.upper() == '':
+            viseme = 'M'  # Closed mouth for silence
+        else:
+            viseme = PHONEME_TO_VISEME.get(phoneme.upper(), 'M')  # Default to 'M' instead of 'A' for neutral
         visemes.append(viseme)
     return visemes
+
+
+def detect_silence_periods(audio_path: str, silence_threshold: float = -40.0, min_silence_duration: float = 0.1):
+    """
+    Detect silence periods in audio file.
+    Returns list of (start_time, end_time) tuples for silence periods.
+    
+    Args:
+        audio_path: Path to audio file
+        silence_threshold: dB threshold below which audio is considered silent (default -40dB)
+        min_silence_duration: Minimum duration in seconds to be considered silence (default 0.1s)
+    
+    Returns:
+        List of (start_time, end_time) tuples in seconds
+    """
+    try:
+        audio = AudioSegment.from_wav(audio_path)
+        
+        # Convert to mono if stereo
+        if audio.channels > 1:
+            audio = audio.set_channels(1)
+        
+        # Detect silence periods
+        silence_periods = []
+        chunks = audio[::100]  # Analyze every 100ms
+        
+        in_silence = False
+        silence_start = 0.0
+        
+        for i, chunk in enumerate(chunks):
+            chunk_time = i * 0.1  # Each chunk is 0.1 seconds
+            dBFS = chunk.dBFS
+            
+            if dBFS < silence_threshold:
+                if not in_silence:
+                    in_silence = True
+                    silence_start = chunk_time
+            else:
+                if in_silence:
+                    silence_duration = chunk_time - silence_start
+                    if silence_duration >= min_silence_duration:
+                        silence_periods.append((silence_start, chunk_time))
+                    in_silence = False
+        
+        # Handle silence at the end
+        if in_silence:
+            silence_duration = len(audio) / 1000.0 - silence_start
+            if silence_duration >= min_silence_duration:
+                silence_periods.append((silence_start, len(audio) / 1000.0))
+        
+        return silence_periods
+    except Exception as e:
+        print(f"⚠ Warning: Could not detect silence periods: {e}")
+        return []
 
 
 def preprocess_and_cache_face(image_path: str, cache_id: str = "default", size: int = 256):
@@ -428,7 +488,8 @@ def generate_viseme(viseme_type: str, face_cache: dict, size: int = 256):
         temp_audio,
         device,
         ref_eyeblink_coeff_path=None,
-        still=True
+        still=True,
+        use_blink=True  # Enable blink for natural visemes
     )
     
     coeff_path = audio_to_coeff.generate(batch, viseme_gen_dir, pose_style=0, ref_pose_coeff_path=None)
@@ -548,8 +609,112 @@ def generate_viseme(viseme_type: str, face_cache: dict, size: int = 256):
     return None
 
 
+def generate_blink_frame(face_cache: dict, size: int = 256):
+    """Generate a blink frame (closed eyes) for eye blink overlay."""
+    from src.utils.init_path import init_path
+    from src.test_audio2coeff import Audio2Coeff
+    from src.facerender.animate import AnimateFromCoeff
+    from src.generate_batch import get_data
+    from src.generate_facerender_batch import get_facerender_data
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Create a short silent audio (or very short audio) for blink
+    temp_audio = os.path.join(VISEME_DIR, f"temp_{BLINK_VISEME}.wav")
+    # Generate a very short audio (0.1s) with silence or minimal sound
+    asyncio.run(text_to_speech_async("mm", "en-US-JennyNeural", temp_audio))
+    
+    # Generate video frame with blink
+    sadtalker_paths = init_path(CHECKPOINT_DIR, os.path.join(BASE_DIR, 'src/config'), size, False, 'full')
+    audio_to_coeff = Audio2Coeff(sadtalker_paths, device)
+    animate_from_coeff = AnimateFromCoeff(sadtalker_paths, device)
+    
+    viseme_gen_dir = os.path.join(VISEME_DIR, BLINK_VISEME)
+    os.makedirs(viseme_gen_dir, exist_ok=True)
+    
+    # Generate with blink enabled
+    batch = get_data(
+        face_cache['first_coeff_path'],
+        temp_audio,
+        device,
+        ref_eyeblink_coeff_path=None,
+        still=True,
+        use_blink=True  # Enable blink
+    )
+    
+    coeff_path = audio_to_coeff.generate(batch, viseme_gen_dir, pose_style=0, ref_pose_coeff_path=None)
+    
+    data = get_facerender_data(
+        coeff_path,
+        face_cache['crop_pic_path'],
+        face_cache['first_coeff_path'],
+        temp_audio,
+        batch_size=2,
+        input_yaw_list=None,
+        input_pitch_list=None,
+        input_roll_list=None,
+        expression_scale=1.0,
+        still_mode=True,
+        preprocess='full',
+        size=size
+    )
+    
+    result = animate_from_coeff.generate(
+        data,
+        viseme_gen_dir,
+        face_cache['image_path'],
+        face_cache['crop_info'],
+        enhancer=None,
+        background_enhancer=None,
+        preprocess='full',
+        img_size=size
+    )
+    
+    # Extract frame with closed eyes (middle frame usually has blink)
+    if os.path.exists(result):
+        cap = cv2.VideoCapture(result)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Try to find frame with closed eyes
+        # Blinks typically occur in the middle-to-end of short audio clips
+        blink_frame = None
+        if frame_count > 0:
+            # Try multiple frames to find one with closed eyes
+            # Start from middle and go towards end (where blink is more likely)
+            sample_indices = []
+            if frame_count >= 3:
+                # Sample from middle to end
+                mid_point = frame_count // 2
+                sample_indices = list(range(mid_point, min(frame_count, mid_point + frame_count // 3)))
+            else:
+                sample_indices = [frame_count // 2] if frame_count > 0 else [0]
+            
+            for idx in sample_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if ret:
+                    blink_frame = frame
+                    break
+            
+            # If still no frame, try last frame
+            if blink_frame is None and frame_count > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
+                ret, frame = cap.read()
+                if ret:
+                    blink_frame = frame
+        
+        cap.release()
+        
+        if blink_frame is not None:
+            blink_path = os.path.join(VISEME_DIR, f"viseme_{BLINK_VISEME}.png")
+            cv2.imwrite(blink_path, blink_frame)
+            return blink_path
+    
+    return None
+
+
 def generate_viseme_library():
-    """Pre-generate all visemes (mouth shapes) - runs once."""
+    """Pre-generate all visemes (mouth shapes) + blink frame - runs once."""
     print("🎭 Generating viseme library (this runs once)...")
     
     face_cache = load_face_cache()
@@ -559,6 +724,7 @@ def generate_viseme_library():
     viseme_library = {}
     size = face_cache.get('size', 256)
     
+    # Generate mouth visemes
     for viseme_type in VISEME_TYPES:
         print(f"   Generating viseme: {viseme_type}")
         viseme_path = generate_viseme(viseme_type, face_cache, size)
@@ -567,6 +733,15 @@ def generate_viseme_library():
             print(f"   ✓ {viseme_type} ready")
         else:
             print(f"   ⚠ Failed to generate {viseme_type}")
+    
+    # Generate blink frame
+    print(f"   Generating blink frame...")
+    blink_path = generate_blink_frame(face_cache, size)
+    if blink_path:
+        viseme_library[BLINK_VISEME] = blink_path
+        print(f"   ✓ Blink frame ready")
+    else:
+        print(f"   ⚠ Failed to generate blink frame")
     
     # Save viseme library
     with open(VISEME_LIBRARY_FILE, 'wb') as f:
@@ -577,7 +752,7 @@ def generate_viseme_library():
         json.dump(PHONEME_TO_VISEME, f, indent=2)
     
     generated = len([v for v in viseme_library.values() if v])
-    return viseme_library, f"✅ Viseme library generated!\n   {generated}/{len(VISEME_TYPES)} visemes ready"
+    return viseme_library, f"✅ Viseme library generated!\n   {generated}/{len(VISEME_TYPES) + 1} visemes + blink ready"
 
 
 def load_viseme_library():
@@ -650,6 +825,87 @@ def regenerate_mouth_regions():
                         regenerated += 1
     
     return regenerated, f"✅ Regenerated {regenerated}/{len(VISEME_TYPES)} mouth region files"
+
+
+def blend_blink_onto_face(base_face, blink_frame, face_cache):
+    """Blend blink frame (closed eyes) onto base face image."""
+    if blink_frame is None or blink_frame.size == 0:
+        return base_face.copy()
+    
+    h, w = base_face.shape[:2]
+    
+    # Use crop_info to find face position in full image
+    if face_cache.get('crop_info') and len(face_cache['crop_info']) == 3:
+        r_w, r_h = face_cache['crop_info'][0]
+        clx, cly, crx, cry = face_cache['crop_info'][1]
+        lx, ly, rx, ry = face_cache['crop_info'][2]
+        lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+        
+        # Face bounding box in full image coordinates
+        ox1, oy1, ox2, oy2 = clx + lx, cly + ly, clx + rx, cly + ry
+        
+        # Ensure coordinates are within image bounds
+        ox1, oy1 = max(0, ox1), max(0, oy1)
+        ox2, oy2 = min(w, ox2), min(h, oy2)
+        
+        # Eye region is upper 20-45% of face (from top of face) - more accurate positioning
+        face_h = oy2 - oy1
+        face_w = ox2 - ox1
+        
+        eye_y1 = oy1 + int(face_h * 0.20)  # Start at 20% down the face (eyes are higher)
+        eye_y2 = oy1 + int(face_h * 0.45)  # End at 45% down the face
+        eye_x1 = ox1 + int(face_w * 0.10)  # Start at 10% from left (wider eye region)
+        eye_x2 = ox1 + int(face_w * 0.90)  # End at 90% from left
+        
+        # Ensure eye coordinates are within image bounds
+        eye_y1, eye_x1 = max(0, eye_y1), max(0, eye_x1)
+        eye_y2, eye_x2 = min(h, eye_y2), min(w, eye_x2)
+    else:
+        # Fallback: assume face crop (eyes are higher up)
+        eye_y1, eye_y2 = int(h * 0.20), int(h * 0.45)
+        eye_x1, eye_x2 = int(w * 0.10), int(w * 0.90)
+        
+        eye_y1 = max(0, eye_y1)
+        eye_y2 = min(h, eye_y2)
+        eye_x1 = max(0, eye_x1)
+        eye_x2 = min(w, eye_x2)
+    
+    eye_h = eye_y2 - eye_y1
+    eye_w = eye_x2 - eye_x1
+    
+    if eye_h <= 0 or eye_w <= 0:
+        return base_face.copy()
+    
+    # Resize blink frame to match eye region size
+    blink_resized = cv2.resize(blink_frame, (w, h))
+    eye_region_blink = blink_resized[eye_y1:eye_y2, eye_x1:eye_x2]
+    
+    # Create mask for blending (feather edges)
+    mask = np.ones((eye_h, eye_w), dtype=np.float32)
+    feather = min(10, eye_h // 3, eye_w // 3)
+    
+    for i in range(feather):
+        alpha = i / max(feather, 1)
+        if i < eye_h:
+            mask[i, :] *= alpha
+            mask[-i-1, :] *= alpha
+        if i < eye_w:
+            mask[:, i] *= alpha
+            mask[:, -i-1] *= alpha
+    
+    mask_3d = np.stack([mask] * 3, axis=2)
+    
+    # Blend eye region (strong blend for visible blink)
+    result = base_face.copy()
+    eye_region = result[eye_y1:eye_y2, eye_x1:eye_x2].astype(np.float32)
+    
+    blend_ratio = 0.85  # Strong blend for visible blink
+    blended = (eye_region * (1 - mask_3d * blend_ratio) + 
+               eye_region_blink.astype(np.float32) * mask_3d * blend_ratio).astype(np.uint8)
+    
+    result[eye_y1:eye_y2, eye_x1:eye_x2] = blended
+    
+    return result
 
 
 def blend_mouth_onto_face(base_face, viseme_mouth, face_cache):
@@ -790,18 +1046,26 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     print(f"🔍 Debug: Phonemes ({len(phonemes)}): {phonemes[:20]}")
     print(f"🔍 Debug: Visemes ({len(visemes)}): {visemes[:20]}")
     
-    # Step 3: Get audio duration
+    # Step 3: Get audio duration and detect silence periods
     audio_seg = AudioSegment.from_wav(audio_path)
     audio_duration = len(audio_seg) / 1000.0
     total_frames = int(audio_duration * fps)
     
+    # Detect silence periods in audio
+    silence_periods = detect_silence_periods(audio_path, silence_threshold=-35.0, min_silence_duration=0.15)
+    if silence_periods:
+        print(f"🔍 Debug: Detected {len(silence_periods)} silence periods: {silence_periods[:5]}")
+    
     # Better viseme timing: make visemes change more frequently for realistic movement
     # Merge consecutive identical visemes to avoid static periods
+    # Keep 'SP' visemes as 'M' (closed mouth) for silence
     visemes_merged = []
     for v in visemes:
-        if v != 'SP':  # Skip spaces
-            if not visemes_merged or visemes_merged[-1] != v:
-                visemes_merged.append(v)
+        # Convert 'SP' to 'M' for closed mouth during silence
+        if v == 'SP':
+            v = 'M'
+        if not visemes_merged or visemes_merged[-1] != v:
+            visemes_merged.append(v)
     
     if visemes_merged and len(visemes_merged) > 0:
         # Use fewer frames per viseme for faster, more realistic changes
@@ -834,12 +1098,23 @@ def compose_live_video_streaming(text: str, fps: int = 25):
                 mouth_library[viseme_type] = mouth_img
     
     # Step 5: Compose frames and stream them
-    yield None, audio_path, f"✓ Phonemes: {len(phonemes)}, Visemes: {len(visemes)}\n✓ Loaded {len(mouth_library)}/{len(VISEME_TYPES)} mouth regions\n🔄 Composing frames..."
+    silence_info = f" ({len(silence_periods)} silence periods detected)" if silence_periods else ""
+    yield None, audio_path, f"✓ Phonemes: {len(phonemes)}, Visemes: {len(visemes)}\n✓ Loaded {len(mouth_library)}/{len(VISEME_TYPES)} mouth regions{silence_info}\n🔄 Composing frames..."
     
     gen_dir = os.path.join(RESULT_DIR, f"live_{ts}")
     os.makedirs(gen_dir, exist_ok=True)
     
     h, w = base_image.shape[:2]
+    
+    # Load blink frame (after we know image dimensions)
+    blink_frame = None
+    if BLINK_VISEME in viseme_library:
+        blink_path = viseme_library[BLINK_VISEME]
+        if os.path.exists(blink_path):
+            blink_frame = cv2.imread(blink_path)
+            if blink_frame is not None:
+                blink_frame = cv2.resize(blink_frame, (w, h))
+                print(f"✓ Blink frame loaded")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     temp_video = os.path.join(gen_dir, "temp_video.mp4")
     out = cv2.VideoWriter(temp_video, fourcc, fps, (w, h))
@@ -855,10 +1130,46 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     if not mouth_library:
         yield None, None, f"⚠️ No mouth library found! Run 'Generate Viseme Library' in Setup tab.\nLooking in: {VISEME_DIR}"
     
+    # Ensure 'M' (closed mouth) is available for silence periods
+    if 'M' not in mouth_library and viseme_library and 'M' in viseme_library:
+        # Try to extract 'M' mouth region from viseme frame
+        m_path = viseme_library['M']
+        if os.path.exists(m_path):
+            m_frame = cv2.imread(m_path)
+            if m_frame is not None:
+                m_frame = cv2.resize(m_frame, (w, h))
+                # Extract mouth using crop_info
+                if face_cache.get('crop_info') and len(face_cache['crop_info']) == 3:
+                    r_w, r_h = face_cache['crop_info'][0]
+                    clx, cly, crx, cry = face_cache['crop_info'][1]
+                    lx, ly, rx, ry = face_cache['crop_info'][2]
+                    lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+                    
+                    ox1, oy1, ox2, oy2 = clx + lx, cly + ly, clx + rx, cly + ry
+                    ox1, oy1 = max(0, ox1), max(0, oy1)
+                    ox2, oy2 = min(w, ox2), min(h, oy2)
+                    
+                    face_h = oy2 - oy1
+                    face_w = ox2 - ox1
+                    
+                    mouth_y1 = oy1 + int(face_h * 0.60)
+                    mouth_y2 = oy1 + int(face_h * 0.85)
+                    mouth_x1 = ox1 + int(face_w * 0.25)
+                    mouth_x2 = ox1 + int(face_w * 0.75)
+                    
+                    mouth_y1, mouth_x1 = max(0, mouth_y1), max(0, mouth_x1)
+                    mouth_y2, mouth_x2 = min(h, mouth_y2), min(w, mouth_x2)
+                    
+                    if mouth_y2 > mouth_y1 and mouth_x2 > mouth_x1:
+                        m_mouth = m_frame[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
+                        if m_mouth.size > 0:
+                            mouth_library['M'] = m_mouth
+                            print(f"✓ Extracted 'M' mouth region for silence periods")
+    
     # Use merged visemes (consecutive duplicates removed) for display
     visemes_for_display = visemes_merged if visemes_merged else []
     if not visemes_for_display:
-        visemes_for_display = ['A']  # At least one viseme
+        visemes_for_display = ['M']  # Default to closed mouth for neutral
     
     # Debug: Show unique visemes being used
     unique_visemes = list(set(visemes_for_display))
@@ -871,9 +1182,32 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     last_viseme = None
     viseme_changes = []
     
+    # Blink timing: random blinks every 2-4 seconds (natural blink rate)
+    blink_interval_frames = random.randint(int(fps * 2), int(fps * 4))  # 2-4 seconds
+    next_blink_frame = blink_interval_frames
+    blink_duration_frames = 3  # Blink lasts 3 frames (~0.12s at 25fps)
+    is_blinking = False
+    blink_start_frame = 0
+    
     for frame_idx in range(total_frames):
+        # Calculate current time in seconds
+        current_time = frame_idx / fps
+        
+        # Check if we're in a silence period - use closed mouth ('M') viseme
+        is_silent = False
+        for silence_start, silence_end in silence_periods:
+            if silence_start <= current_time <= silence_end:
+                is_silent = True
+                break
+        
         # Calculate which viseme should be shown at this frame
-        if visemes_for_display:
+        if is_silent:
+            # Use closed mouth ('M') during silence
+            current_viseme = 'M'
+            if current_viseme != last_viseme:
+                viseme_changes.append((frame_idx, current_viseme))
+                last_viseme = current_viseme
+        elif visemes_for_display:
             # Calculate viseme index based on frame position
             viseme_idx = min(frame_idx // frames_per_viseme, len(visemes_for_display) - 1)
             current_viseme = visemes_for_display[viseme_idx]
@@ -883,34 +1217,78 @@ def compose_live_video_streaming(text: str, fps: int = 25):
                 viseme_changes.append((frame_idx, current_viseme))
                 last_viseme = current_viseme
         else:
-            # No visemes available, use default
-            current_viseme = 'A'  # Default viseme
+            # No visemes available, use default (closed mouth for neutral)
+            current_viseme = 'M'  # Default to closed mouth instead of 'A'
+        
+        # Check if we should blink (random timing)
+        if blink_frame is not None:
+            if frame_idx >= next_blink_frame and not is_blinking:
+                # Start blink
+                is_blinking = True
+                blink_start_frame = frame_idx
+                next_blink_frame = frame_idx + random.randint(int(fps * 2), int(fps * 4))
+            elif is_blinking and (frame_idx - blink_start_frame) >= blink_duration_frames:
+                # End blink
+                is_blinking = False
         
         # Blend mouth from viseme onto base face
+        # During silence, use 'M' (closed mouth) viseme
+        frame = base_image.copy()  # Start with base image
+        viseme_applied = False
+        
         if current_viseme in mouth_library and mouth_library[current_viseme] is not None:
-            frame = blend_mouth_onto_face(base_image.copy(), mouth_library[current_viseme], face_cache)
+            # Use pre-extracted mouth region (fastest)
+            frame = blend_mouth_onto_face(frame, mouth_library[current_viseme], face_cache)
+            viseme_applied = True
         elif viseme_library and current_viseme in viseme_library:
             # Fallback: extract mouth from full viseme frame if mouth region file not available
-            viseme_path = viseme_library.get(current_viseme, viseme_library.get('A'))
+            viseme_path = viseme_library.get(current_viseme)
+            if not viseme_path and current_viseme == 'M':
+                # Try 'A' as fallback for 'M' if not found
+                viseme_path = viseme_library.get('A')
+            
             if viseme_path and os.path.exists(viseme_path):
                 viseme_frame = cv2.imread(viseme_path)
                 if viseme_frame is not None:
                     viseme_frame = cv2.resize(viseme_frame, (w, h))
-                    # Extract mouth region from full viseme frame
-                    mouth_y1, mouth_y2 = int(h * 0.5), int(h * 0.85)
-                    mouth_x1, mouth_x2 = int(w * 0.25), int(w * 0.75)
+                    # Extract mouth region using crop_info for accurate positioning
+                    if face_cache.get('crop_info') and len(face_cache['crop_info']) == 3:
+                        r_w, r_h = face_cache['crop_info'][0]
+                        clx, cly, crx, cry = face_cache['crop_info'][1]
+                        lx, ly, rx, ry = face_cache['crop_info'][2]
+                        lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+                        
+                        ox1, oy1, ox2, oy2 = clx + lx, cly + ly, clx + rx, cly + ry
+                        ox1, oy1 = max(0, ox1), max(0, oy1)
+                        ox2, oy2 = min(w, ox2), min(h, oy2)
+                        
+                        face_h = oy2 - oy1
+                        face_w = ox2 - ox1
+                        
+                        mouth_y1 = oy1 + int(face_h * 0.60)
+                        mouth_y2 = oy1 + int(face_h * 0.85)
+                        mouth_x1 = ox1 + int(face_w * 0.25)
+                        mouth_x2 = ox1 + int(face_w * 0.75)
+                        
+                        mouth_y1, mouth_x1 = max(0, mouth_y1), max(0, mouth_x1)
+                        mouth_y2, mouth_x2 = min(h, mouth_y2), min(w, mouth_x2)
+                    else:
+                        # Fallback coordinates
+                        mouth_y1, mouth_y2 = int(h * 0.5), int(h * 0.85)
+                        mouth_x1, mouth_x2 = int(w * 0.25), int(w * 0.75)
+                    
                     viseme_mouth = viseme_frame[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
                     if viseme_mouth.size > 0:
-                        frame = blend_mouth_onto_face(base_image.copy(), viseme_mouth, face_cache)
-                    else:
-                        frame = base_image.copy()
-                else:
-                    frame = base_image.copy()
-            else:
-                frame = base_image.copy()
-        else:
-            # No viseme available, use base image
-            frame = base_image.copy()
+                        frame = blend_mouth_onto_face(frame, viseme_mouth, face_cache)
+                        viseme_applied = True
+        
+        # If still no viseme applied and we have 'M' available, use it as fallback
+        if not viseme_applied and 'M' in mouth_library:
+            frame = blend_mouth_onto_face(frame, mouth_library['M'], face_cache)
+        
+        # Apply blink overlay if blinking
+        if is_blinking and blink_frame is not None:
+            frame = blend_blink_onto_face(frame, blink_frame, face_cache)
         
         out.write(frame)
         
@@ -949,7 +1327,8 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     
     elapsed = time.time() - start_time
     viseme_info = f"{len(viseme_changes)} transitions" if viseme_changes else "static"
-    yield final_video, audio_path, f"✅ Generated in {elapsed:.1f}s\n📹 {os.path.basename(final_video)}\n🎭 Viseme-based lip sync ({viseme_info})\n💡 Tip: Regenerate viseme library for more pronounced shapes"
+    blink_info = "with eye blinks" if blink_frame is not None else "no blinks"
+    yield final_video, audio_path, f"✅ Generated in {elapsed:.1f}s\n📹 {os.path.basename(final_video)}\n🎭 Viseme-based lip sync ({viseme_info})\n👁️ {blink_info}\n💡 Tip: Regenerate viseme library for more pronounced shapes"
 
 
 def compose_live_video(text: str, fps: int = 25):
