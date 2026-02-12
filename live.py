@@ -187,6 +187,8 @@ EYE_FACE_BOTTOM = 0.48 # end of eye strip (covers eyes + lids)
 EYE_FACE_LEFT = 0.08
 EYE_FACE_RIGHT = 0.92
 EYE_VERTICAL_NUDGE = 0  # add to top/bottom (e.g. 0.02 = 2% face height down)
+# Viseme smoothing: blend over this many frames at each lip change (reduces step-by-step look)
+VISEME_SMOOTH_FRAMES = 4
 
 
 def text_to_phonemes_simple(text: str):
@@ -1013,9 +1015,38 @@ def blend_blink_onto_face(base_face, blink_frame, face_cache, blend_strength=1.0
     return result
 
 
+def get_mouth_for_viseme(viseme_name, mouth_library, viseme_library, face_cache, w, h):
+    """Return mouth ROI (numpy array) for a viseme, or None. Used for smoothing blend."""
+    if not viseme_name:
+        return None
+    if mouth_library and viseme_name in mouth_library:
+        m = mouth_library[viseme_name]
+        if m is not None and getattr(m, 'size', 0) > 0:
+            return m
+    if viseme_library and viseme_name in viseme_library:
+        vpath = viseme_library.get(viseme_name) or (viseme_library.get('Aa') if viseme_name == 'M' else None)
+        if vpath and os.path.exists(vpath):
+            vframe = cv2.imread(vpath)
+            if vframe is not None:
+                vframe = cv2.resize(vframe, (w, h))
+                if face_cache.get('crop_info') and len(face_cache['crop_info']) == 3:
+                    _, (clx, cly, crx, cry), (lx, ly, rx, ry) = face_cache['crop_info']
+                    lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+                    ox1, oy1, ox2, oy2 = clx + lx, cly + ly, clx + rx, cly + ry
+                    face_h, face_w = oy2 - oy1, ox2 - ox1
+                    my1 = oy1 + int(face_h * 0.60)
+                    my2 = oy1 + int(face_h * 0.85)
+                    mx1 = ox1 + int(face_w * 0.25)
+                    mx2 = ox1 + int(face_w * 0.75)
+                    mouth = vframe[my1:my2, mx1:mx2]
+                    if mouth.size > 0:
+                        return mouth
+    return None
+
+
 def blend_mouth_onto_face(base_face, viseme_mouth, face_cache):
     """Blend mouth region from viseme onto base face image."""
-    if viseme_mouth is None or viseme_mouth.size == 0:
+    if viseme_mouth is None or (isinstance(viseme_mouth, np.ndarray) and viseme_mouth.size == 0):
         return base_face.copy()
     
     h, w = base_face.shape[:2]
@@ -1172,10 +1203,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
             visemes_merged.append(v)
     
     if visemes_merged and len(visemes_merged) > 0:
-        # More frames per viseme = slower, smoother, more natural transitions
-        frames_per_viseme = max(5, total_frames // len(visemes_merged))
-        # Cap at 8 frames per viseme so changes aren't too jumpy
-        frames_per_viseme = min(frames_per_viseme, 8)
+        # More frames per viseme = smoother; blend smoothing (VISEME_SMOOTH_FRAMES) softens each transition
+        frames_per_viseme = max(4, total_frames // len(visemes_merged))
+        frames_per_viseme = min(frames_per_viseme, 10)
     else:
         frames_per_viseme = max(5, total_frames // max(len(visemes), 1))
     
@@ -1284,8 +1314,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     print(f"🔍 Debug: Frames per viseme: {frames_per_viseme} (for {total_frames} total frames)")
     
     viseme_idx = 0
-    frame_time = 1.0 / fps
     last_viseme = None
+    prev_viseme = None
+    smooth_countdown = 0
     viseme_changes = []
     
     # SadTalker-style blink: same 5-frame curve and random timing as generate_blink_seq_randomly
@@ -1307,39 +1338,50 @@ def compose_live_video_streaming(text: str, fps: int = 25):
         
         # Calculate which viseme should be shown at this frame
         if is_silent:
-            # Use closed mouth ('M') during silence
             current_viseme = 'M'
             if current_viseme != last_viseme:
                 viseme_changes.append((frame_idx, current_viseme))
+                prev_viseme = last_viseme
+                smooth_countdown = VISEME_SMOOTH_FRAMES
                 last_viseme = current_viseme
         elif visemes_for_display:
-            # Calculate viseme index based on frame position
             viseme_idx = min(frame_idx // frames_per_viseme, len(visemes_for_display) - 1)
             current_viseme = visemes_for_display[viseme_idx]
-            
-            # Track viseme changes for debugging
             if current_viseme != last_viseme:
                 viseme_changes.append((frame_idx, current_viseme))
+                prev_viseme = last_viseme
+                smooth_countdown = VISEME_SMOOTH_FRAMES
                 last_viseme = current_viseme
         else:
-            # No visemes available, use default (closed mouth for neutral)
-            current_viseme = 'M'  # Default to closed mouth instead of 'A'
+            current_viseme = 'M'
         
-        # Blend mouth from viseme onto base face
-        # During silence, use 'M' (closed mouth) viseme
-        frame = base_image.copy()  # Start with base image
+        # Smooth transition: blend from prev_viseme to current_viseme over VISEME_SMOOTH_FRAMES
+        frame = base_image.copy()
         viseme_applied = False
+        curr_mouth = get_mouth_for_viseme(current_viseme, mouth_library, viseme_library, face_cache, w, h)
         
-        if current_viseme in mouth_library and mouth_library[current_viseme] is not None:
-            # Use pre-extracted mouth region (fastest)
+        if smooth_countdown > 0 and prev_viseme is not None:
+            prev_mouth = get_mouth_for_viseme(prev_viseme, mouth_library, viseme_library, face_cache, w, h)
+            if prev_mouth is not None and curr_mouth is not None:
+                if prev_mouth.shape != curr_mouth.shape:
+                    prev_mouth = cv2.resize(prev_mouth, (curr_mouth.shape[1], curr_mouth.shape[0]))
+                alpha = 1.0 - (smooth_countdown / max(VISEME_SMOOTH_FRAMES, 1))
+                blended = (prev_mouth.astype(np.float32) * (1 - alpha) + curr_mouth.astype(np.float32) * alpha).astype(np.uint8)
+                frame = blend_mouth_onto_face(frame, blended, face_cache)
+                viseme_applied = True
+            smooth_countdown = max(0, smooth_countdown - 1)
+        
+        if not viseme_applied and curr_mouth is not None:
+            frame = blend_mouth_onto_face(frame, curr_mouth, face_cache)
+            viseme_applied = True
+        elif not viseme_applied and current_viseme in mouth_library and mouth_library[current_viseme] is not None:
             frame = blend_mouth_onto_face(frame, mouth_library[current_viseme], face_cache)
             viseme_applied = True
-        elif viseme_library and current_viseme in viseme_library:
+        elif not viseme_applied and viseme_library and current_viseme in viseme_library:
             # Fallback: extract mouth from full viseme frame if mouth region file not available
             viseme_path = viseme_library.get(current_viseme)
             if not viseme_path and current_viseme == 'M':
-                # Try 'A' as fallback for 'M' if not found
-                viseme_path = viseme_library.get('A')
+                viseme_path = viseme_library.get('Aa') or viseme_library.get('A')
             
             if viseme_path and os.path.exists(viseme_path):
                 viseme_frame = cv2.imread(viseme_path)
