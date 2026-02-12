@@ -83,37 +83,95 @@ print(f"🎭 Live mode: Real-time viseme-based avatar")
 sys.path.insert(0, BASE_DIR)
 
 
-# Phoneme to Viseme mapping (simplified - covers most English phonemes)
-PHONEME_TO_VISEME = {
-    # Vowels (open mouth)
-    'AA': 'A', 'AE': 'A', 'AH': 'A', 'AO': 'O', 'AW': 'O', 'AY': 'A',
-    'EH': 'E', 'ER': 'E', 'EY': 'E',
-    'IH': 'I', 'IY': 'I',
-    'OW': 'O', 'OY': 'O',
-    'UH': 'U', 'UW': 'U',
-    
-    # Consonants - Closed (M, B, P)
-    'M': 'M', 'B': 'M', 'P': 'M',
-    
-    # Consonants - Fricatives (F, V, TH)
-    'F': 'F', 'V': 'F', 'TH': 'F', 'DH': 'F',
-    
-    # Consonants - Wide (W, OO)
-    'W': 'W', 'UW': 'W',
-    
-    # Consonants - Teeth (T, D, N, L, S, Z)
-    'T': 'T', 'D': 'T', 'N': 'T', 'L': 'T', 'S': 'T', 'Z': 'T',
-    
-    # Consonants - Rest (K, G, R, Y, etc.)
-    'K': 'A', 'G': 'A', 'R': 'A', 'Y': 'A', 'HH': 'A', 'NG': 'A',
-    'CH': 'T', 'JH': 'T', 'SH': 'T', 'ZH': 'T',
-    
-    # Silence/rest
-    'SIL': 'A', 'SP': 'A', '': 'A'
-}
+# Microsoft-style 22 visemes (IDs 0-21) for finer lip-sync. Names match mouth shapes.
+# See: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-speech-synthesis-viseme
+VISEME_TYPES_22 = [
+    'Sil',  # 0 - Silence (closed)
+    'Ax',   # 1 - æ, ə, ʌ (schwa, open mid)
+    'Aa',   # 2 - ɑ (open back ah)
+    'Ao',   # 3 - ɔ (aw)
+    'Eh',   # 4 - ɛ, ʊ (eh, uh)
+    'Er',   # 5 - ɝ (er)
+    'Iy',   # 6 - j, i, ɪ (ee, y)
+    'W',    # 7 - w, u (w, oo)
+    'Oh',   # 8 - o (oh)
+    'Ow',   # 9 - aʊ (ow diphthong)
+    'Oy',   # 10 - ɔɪ (oy)
+    'Ay',   # 11 - aɪ (eye)
+    'H',    # 12 - h (aspirate)
+    'R',    # 13 - ɹ (r)
+    'L',    # 14 - l (l)
+    'S',    # 15 - s, z (sibilant)
+    'Sh',   # 16 - ʃ, tʃ, dʒ, ʒ (sh, ch, j)
+    'Th',   # 17 - ð (voiced th)
+    'F',    # 18 - f, v (f, v)
+    'T',    # 19 - d, t, n, θ (alveolar/dental)
+    'K',    # 20 - k, g, ŋ (velar)
+    'M',    # 21 - p, b, m (bilabial closed)
+]
+VISEME_TYPES = VISEME_TYPES_22  # 22 visemes (was 9)
+BLINK_VISEME = 'BLINK'  # Special viseme for eye blinks (not in 22)
 
-# Viseme types (mouth shapes we need to pre-render)
-VISEME_TYPES = ['A', 'E', 'I', 'O', 'U', 'M', 'F', 'W', 'T']  # 9 basic visemes
+# Phoneme (ARPAbet / IPA-like) to 22 viseme names
+PHONEME_TO_VISEME = {
+    # Silence
+    'SIL': 'Sil', 'SP': 'Sil', '': 'Sil',
+    # 1 Ax - schwa, reduced
+    'AH': 'Ax', 'AX': 'Ax', 'AX-H': 'Ax',
+    # 2 Aa - open back
+    'AA': 'Aa', 'AA0': 'Aa', 'AA1': 'Aa', 'AA2': 'Aa',
+    # 3 Ao - aw
+    'AO': 'Ao', 'AO0': 'Ao', 'AO1': 'Ao', 'AO2': 'Ao', 'AW': 'Ao', 'AW0': 'Ao', 'AW1': 'Ao', 'AW2': 'Ao',
+    # 4 Eh - eh, uh
+    'AE': 'Eh', 'AE0': 'Eh', 'AE1': 'Eh', 'AE2': 'Eh', 'EH': 'Eh', 'EH0': 'Eh', 'EH1': 'Eh', 'EH2': 'Eh',
+    'UH': 'Eh', 'UH0': 'Eh', 'UH1': 'Eh', 'UH2': 'Eh', 'UX': 'Eh', 'EY': 'Eh', 'EY0': 'Eh', 'EY1': 'Eh', 'EY2': 'Eh',
+    # 5 Er
+    'ER': 'Er', 'ER0': 'Er', 'ER1': 'Er', 'ER2': 'Er', 'AXR': 'Er',
+    # 6 Iy - ee, y
+    'IH': 'Iy', 'IH0': 'Iy', 'IH1': 'Iy', 'IH2': 'Iy', 'IY': 'Iy', 'IY0': 'Iy', 'IY1': 'Iy', 'IY2': 'Iy', 'Y': 'Iy',
+    # 7 W - w, oo
+    'W': 'W', 'UW': 'W', 'UW0': 'W', 'UW1': 'W', 'UW2': 'W',
+    # 8 Oh
+    'OW': 'Oh', 'OW0': 'Oh', 'OW1': 'Oh', 'OW2': 'Oh', 'O': 'Oh',
+    # 9 Ow diphthong
+    'AW': 'Ow',  # also in Ao; prefer Ow for diphthong
+    # 10 Oy
+    'OY': 'Oy', 'OY0': 'Oy', 'OY1': 'Oy', 'OY2': 'Oy',
+    # 11 Ay
+    'AY': 'Ay', 'AY0': 'Ay', 'AY1': 'Ay', 'AY2': 'Ay',
+    # 12 H
+    'HH': 'H', 'H': 'H',
+    # 13 R
+    'R': 'R', 'R0': 'R', 'R1': 'R', 'R2': 'R',
+    # 14 L
+    'L': 'L', 'L0': 'L', 'L1': 'L', 'L2': 'L',
+    # 15 S
+    'S': 'S', 'Z': 'S',
+    # 16 Sh
+    'SH': 'Sh', 'ZH': 'Sh', 'CH': 'Sh', 'JH': 'Sh',
+    # 17 Th voiced
+    'DH': 'Th', 'DH0': 'Th', 'DH1': 'Th', 'DH2': 'Th',
+    # 18 F
+    'F': 'F', 'V': 'F', 'V0': 'F', 'V1': 'F', 'V2': 'F',
+    # 19 T (alveolar/dental)
+    'T': 'T', 'D': 'T', 'N': 'T', 'TH': 'T', 'NX': 'T',
+    # 20 K
+    'K': 'K', 'G': 'K', 'NG': 'K',
+    # 21 M
+    'M': 'M', 'B': 'M', 'P': 'M', 'EM': 'M', 'EN': 'T',
+}
+# IPA (phonemizer may return these): map to same 22 visemes
+for _ipa, _v in [
+    ('æ', 'Eh'), ('ə', 'Ax'), ('ʌ', 'Ax'), ('ɑ', 'Aa'), ('ɔ', 'Ao'), ('ɛ', 'Eh'), ('ʊ', 'Eh'),
+    ('ɝ', 'Er'), ('ɹ', 'R'), ('ɪ', 'Iy'), ('i', 'Iy'), ('j', 'Iy'), ('u', 'W'), ('w', 'W'),
+    ('o', 'Oh'), ('aʊ', 'Ow'), ('ɔɪ', 'Oy'), ('aɪ', 'Ay'), ('h', 'H'), ('l', 'L'),
+    ('s', 'S'), ('z', 'S'), ('ʃ', 'Sh'), ('tʃ', 'Sh'), ('dʒ', 'Sh'), ('ʒ', 'Sh'),
+    ('ð', 'Th'), ('f', 'F'), ('v', 'F'), ('t', 'T'), ('d', 'T'), ('n', 'T'), ('θ', 'T'),
+    ('k', 'K'), ('g', 'K'), ('ŋ', 'K'), ('p', 'M'), ('b', 'M'), ('m', 'M'),
+]:
+    PHONEME_TO_VISEME[_ipa] = _v
+# Default for unknown phonemes: closed mouth
+PHONEME_TO_VISEME_DEFAULT = 'M'
 BLINK_VISEME = 'BLINK'  # Special viseme for eye blinks
 
 # SadTalker-style blink: same 5-frame curve as generate_batch.generate_blink_seq_randomly
@@ -327,15 +385,14 @@ def text_to_phonemes_espeak(text: str):
 
 
 def phonemes_to_visemes(phonemes: list):
-    """Convert phoneme sequence to viseme sequence."""
+    """Convert phoneme sequence to viseme sequence (22 visemes)."""
     visemes = []
     for phoneme in phonemes:
-        # Map phoneme to viseme
-        # 'SP' (space/silence) maps to 'M' (closed mouth) for resting position
-        if phoneme.upper() == 'SP' or phoneme.upper() == '':
-            viseme = 'M'  # Closed mouth for silence
-        else:
-            viseme = PHONEME_TO_VISEME.get(phoneme.upper(), 'M')  # Default to 'M' instead of 'A' for neutral
+        if not phoneme:
+            visemes.append('Sil')
+            continue
+        key = phoneme.upper() if isinstance(phoneme, str) else phoneme
+        viseme = PHONEME_TO_VISEME.get(key) or PHONEME_TO_VISEME.get(phoneme) or PHONEME_TO_VISEME_DEFAULT
         visemes.append(viseme)
     return visemes
 
@@ -470,19 +527,31 @@ def generate_viseme(viseme_type: str, face_cache: dict, size: int = 256):
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Create a short audio for this viseme (single phoneme) - use more exaggerated prompts
+    # TTS prompt for each of the 22 visemes (exaggerated for clear mouth shape)
     viseme_audio_map = {
-        'A': 'ah ah ah',  # More pronounced 'ah' sound
-        'E': 'eh eh eh',  # More pronounced 'eh' sound
-        'I': 'ee ee ee',  # More pronounced 'ee' sound
-        'O': 'oh oh oh',  # More pronounced 'oh' sound
-        'U': 'oo oo oo',  # More pronounced 'oo' sound
-        'M': 'mmm mmm mmm',  # More pronounced 'm' sound
-        'F': 'fff fff fff',  # More pronounced 'f' sound
-        'W': 'woo woo woo',  # More pronounced 'w' sound
-        'T': 'tah tah tah'   # More pronounced 't' sound
+        'Sil': 'mmm',           # 0 - closed
+        'Ax': 'a banana',       # 1 - schwa
+        'Aa': 'ah ah ah',       # 2 - open ah
+        'Ao': 'aw aw aw',       # 3 - aw
+        'Eh': 'eh eh eh',       # 4 - eh
+        'Er': 'her bird',       # 5 - er
+        'Iy': 'ee ee ee',       # 6 - ee
+        'W': 'woo woo woo',     # 7 - w, oo
+        'Oh': 'oh oh oh',       # 8 - oh
+        'Ow': 'how now',        # 9 - ow
+        'Oy': 'toy boy',        # 10 - oy
+        'Ay': 'my eye',         # 11 - ay
+        'H': 'ha ha ha',        # 12 - h
+        'R': 'rrr rrr',         # 13 - r
+        'L': 'la la la',        # 14 - l
+        'S': 'sss sss sss',     # 15 - s
+        'Sh': 'shh shh shh',    # 16 - sh
+        'Th': 'the the',        # 17 - voiced th
+        'F': 'fff fff fff',     # 18 - f
+        'T': 'tah tah tah',     # 19 - t
+        'K': 'kuh kuh kuh',     # 20 - k
+        'M': 'mmm mmm mmm',     # 21 - m
     }
-    
     viseme_text = viseme_audio_map.get(viseme_type, 'ah')
     
     # Generate audio for this viseme
@@ -1094,12 +1163,11 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     
     # Better viseme timing: make visemes change more frequently for realistic movement
     # Merge consecutive identical visemes to avoid static periods
-    # Keep 'SP' visemes as 'M' (closed mouth) for silence
+    # Merge consecutive identical visemes; use 'M' (closed) for silence viseme 'Sil'
     visemes_merged = []
     for v in visemes:
-        # Convert 'SP' to 'M' for closed mouth during silence
-        if v == 'SP':
-            v = 'M'
+        if v == 'Sil':
+            v = 'M'  # Sil and M are both closed mouth; use M asset
         if not visemes_merged or visemes_merged[-1] != v:
             visemes_merged.append(v)
     
