@@ -189,6 +189,10 @@ EYE_FACE_RIGHT = 0.92
 EYE_VERTICAL_NUDGE = 0  # add to top/bottom (e.g. 0.02 = 2% face height down)
 # Viseme smoothing: blend over this many frames at each lip change (reduces step-by-step look)
 VISEME_SMOOTH_FRAMES = 4
+# Breathing: subtle chest movement (like blink but for lower body). Set amplitude 0 to disable.
+BREATH_PERIOD_SEC = 6.0       # one breath cycle (inhale+exhale) in seconds; higher = longer gaps
+BREATH_SCALE_AMPLITUDE = 0.008  # horizontal expand/squeeze (keep subtle, e.g. 0.005–0.012)
+CHEST_TOP_FRAC = 0.52         # chest region starts at this fraction of image height (0.5 = lower half)
 
 
 def text_to_phonemes_simple(text: str):
@@ -1015,6 +1019,51 @@ def blend_blink_onto_face(base_face, blink_frame, face_cache, blend_strength=1.0
     return result
 
 
+def apply_breathing(frame, frame_idx, fps, face_cache=None):
+    """Apply subtle horizontal scale (expand/squeeze) to chest region for natural breathing effect."""
+    if BREATH_SCALE_AMPLITUDE <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    # Chest region: lower part of image (below head/face) - tune CHEST_TOP_FRAC if needed
+    y1 = int(h * CHEST_TOP_FRAC)
+    y2 = h
+    chest_h = y2 - y1
+    if chest_h < 10:
+        return frame
+    # Slow sine: one breath cycle (inhale/exhale) every BREATH_PERIOD_SEC
+    phase = 2.0 * np.pi * frame_idx / (fps * BREATH_PERIOD_SEC)
+    # Horizontal scale: expand on inhale (scale_x > 1), contract on exhale (scale_x < 1)
+    scale_x = 1.0 + BREATH_SCALE_AMPLITUDE * np.sin(phase)
+    W_new = max(10, int(w * scale_x))
+    chest_strip = frame[y1:y2, :].copy()
+    # Scale chest horizontally (width changes, height stays same)
+    chest_scaled = cv2.resize(chest_strip, (W_new, chest_h))
+    # Center the scaled chest horizontally; crop/expand to fit original width
+    result = frame.copy()
+    if W_new > w:
+        # Expanded: crop center portion
+        start_x = (W_new - w) // 2
+        chest_fitted = chest_scaled[:, start_x:start_x + w]
+    else:
+        # Contracted: pad left/right to fit
+        pad_left = (w - W_new) // 2
+        pad_right = w - W_new - pad_left
+        chest_fitted = np.pad(chest_scaled, ((0, 0), (pad_left, pad_right), (0, 0)), mode='edge')
+    # Feather top edge of chest region to blend smoothly with upper body/head
+    feather = min(25, chest_h // 3)
+    mask = np.ones((chest_h, w), dtype=np.float32)
+    for i in range(feather):
+        alpha = i / max(feather, 1)
+        if i < chest_h:
+            mask[i, :] *= alpha
+    mask_3d = np.stack([mask] * 3, axis=2)
+    # Blend chest region with feathered top edge
+    region = result[y1:y2, :].astype(np.float32)
+    blended = (region * (1 - mask_3d) + chest_fitted.astype(np.float32) * mask_3d).astype(np.uint8)
+    result[y1:y2, :] = blended
+    return result
+
+
 def get_mouth_for_viseme(viseme_name, mouth_library, viseme_library, face_cache, w, h):
     """Return mouth ROI (numpy array) for a viseme, or None. Used for smoothing blend."""
     if not viseme_name:
@@ -1426,6 +1475,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
         if blink_frame is not None and frame_idx < len(blink_ratio_per_frame) and blink_ratio_per_frame[frame_idx] > 0:
             frame = blend_blink_onto_face(frame, blink_frame, face_cache, blend_strength=blink_ratio_per_frame[frame_idx])
         
+        # Subtle chest breathing (vertical scale on lower part of image)
+        frame = apply_breathing(frame, frame_idx, fps, face_cache)
+        
         out.write(frame)
         
         # Yield progress every 5 frames for smoother updates
@@ -1464,7 +1516,8 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     elapsed = time.time() - start_time
     viseme_info = f"{len(viseme_changes)} transitions" if viseme_changes else "static"
     blink_info = "with eye blinks" if blink_frame is not None else "no blinks"
-    yield final_video, audio_path, f"✅ Generated in {elapsed:.1f}s\n📹 {os.path.basename(final_video)}\n🎭 Viseme-based lip sync ({viseme_info})\n👁️ {blink_info}\n💡 Tip: Regenerate viseme library for more pronounced shapes"
+    breath_info = "\n🫁 with breathing" if BREATH_SCALE_AMPLITUDE > 0 else ""
+    yield final_video, audio_path, f"✅ Generated in {elapsed:.1f}s\n📹 {os.path.basename(final_video)}\n🎭 Viseme-based lip sync ({viseme_info})\n👁️ {blink_info}{breath_info}\n💡 Tip: Regenerate viseme library for more pronounced shapes"
 
 
 def compose_live_video(text: str, fps: int = 25):
