@@ -916,15 +916,30 @@ def regenerate_mouth_regions():
     return regenerated, f"✅ Regenerated {regenerated}/{len(VISEME_TYPES)} mouth region files"
 
 
-def generate_blink_ratio_sadtalker_style(num_frames):
+def generate_blink_ratio_sadtalker_style(num_frames, fps=25, silence_periods=None):
     """
-    Random blink timing: variable intervals + jitter so blinks feel natural, not on a fixed grid.
-    Returns array of shape (num_frames,) with values in [0, 0.5, 0.9, 1.0] for blend strength.
+    Blink timing: biased toward silence (phrase boundaries). Also random blinks.
+    silence_periods: list of (start_sec, end_sec). Blinks are added in these regions.
+    Returns array of shape (num_frames,) with values for blend strength (BLINK_CURVE).
     """
     ratio = np.zeros(num_frames, dtype=np.float32)
     if num_frames <= 30:
         return ratio
-    # First blink: random start in early part of clip (so not always at same time)
+    # 1) Add one blink per silence period (natural at phrase boundaries)
+    if fps and silence_periods:
+        for start_sec, end_sec in silence_periods:
+            start_f = int(start_sec * fps)
+            end_f = int(end_sec * fps)
+            if end_f - start_f >= BLINK_DURATION_FRAMES + 2 and start_f < num_frames:
+                # Place blink within this silence (e.g. near start or middle)
+                max_start = min(start_f + (end_f - start_f - BLINK_DURATION_FRAMES), num_frames - BLINK_DURATION_FRAMES - 1)
+                if max_start >= start_f:
+                    blink_start = random.randint(start_f, max(start_f, max_start))
+                    for i, val in enumerate(BLINK_CURVE):
+                        idx = blink_start + i
+                        if 0 <= idx < num_frames:
+                            ratio[idx] = max(ratio[idx], val)
+    # 2) Random blinks (fewer than before when we have silence bias)
     interval_min = min(BLINK_INTERVAL_MIN_FRAMES, num_frames // 4)
     interval_max = min(BLINK_INTERVAL_MAX_FRAMES, num_frames // 2)
     if interval_max <= interval_min:
@@ -934,8 +949,7 @@ def generate_blink_ratio_sadtalker_style(num_frames):
         for i, val in enumerate(BLINK_CURVE):
             idx = next_blink_at + i
             if 0 <= idx < num_frames:
-                ratio[idx] = val
-        # Next blink: random interval + jitter (different each time)
+                ratio[idx] = max(ratio[idx], val)
         gap = random.randint(interval_min, interval_max)
         jitter = random.randint(-BLINK_JITTER_FRAMES, BLINK_JITTER_FRAMES)
         next_blink_at += BLINK_DURATION_FRAMES + max(10, gap + jitter)
@@ -1368,8 +1382,8 @@ def compose_live_video_streaming(text: str, fps: int = 25):
     smooth_countdown = 0
     viseme_changes = []
     
-    # SadTalker-style blink: same 5-frame curve and random timing as generate_blink_seq_randomly
-    blink_ratio_per_frame = generate_blink_ratio_sadtalker_style(total_frames)
+    # Blink: biased toward silence (one per silence period) + random; 5-frame curve
+    blink_ratio_per_frame = generate_blink_ratio_sadtalker_style(total_frames, fps=fps, silence_periods=silence_periods)
     blink_count = int(np.sum(blink_ratio_per_frame > 0) // BLINK_DURATION_FRAMES)
     if blink_frame is not None and blink_count > 0:
         print(f"✓ Blink schedule: {blink_count} blinks (5-frame curve)")
@@ -1414,7 +1428,9 @@ def compose_live_video_streaming(text: str, fps: int = 25):
             if prev_mouth is not None and curr_mouth is not None:
                 if prev_mouth.shape != curr_mouth.shape:
                     prev_mouth = cv2.resize(prev_mouth, (curr_mouth.shape[1], curr_mouth.shape[0]))
-                alpha = 1.0 - (smooth_countdown / max(VISEME_SMOOTH_FRAMES, 1))
+                # Ease-in-out (smoothstep) so mouth eases into new shape instead of linear move
+                t = 1.0 - (smooth_countdown / max(VISEME_SMOOTH_FRAMES, 1))
+                alpha = t * t * (3.0 - 2.0 * t)
                 blended = (prev_mouth.astype(np.float32) * (1 - alpha) + curr_mouth.astype(np.float32) * alpha).astype(np.uint8)
                 frame = blend_mouth_onto_face(frame, blended, face_cache)
                 viseme_applied = True
