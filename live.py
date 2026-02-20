@@ -191,8 +191,9 @@ EYE_VERTICAL_NUDGE = 0  # add to top/bottom (e.g. 0.02 = 2% face height down)
 VISEME_SMOOTH_FRAMES = 4
 # Breathing: subtle chest movement (like blink but for lower body). Set amplitude 0 to disable.
 BREATH_PERIOD_SEC = 6.0       # one breath cycle (inhale+exhale) in seconds; higher = longer gaps
-BREATH_SCALE_AMPLITUDE = 0.008  # horizontal expand/squeeze (keep subtle, e.g. 0.005–0.012)
-CHEST_TOP_FRAC = 0.52         # chest region starts at this fraction of image height (0.5 = lower half)
+BREATH_SCALE_AMPLITUDE = 0.018  # horizontal expand/squeeze (increased for visibility)
+CHEST_TOP_FRAC = 0.52         # chest region starts at this fraction of image height
+CHEST_CENTER_WIDTH_FRAC = 0.65  # middle 65% of width breathes (ribs); sides (shoulders) stay fixed
 
 
 def text_to_phonemes_simple(text: str):
@@ -1034,47 +1035,55 @@ def blend_blink_onto_face(base_face, blink_frame, face_cache, blend_strength=1.0
 
 
 def apply_breathing(frame, frame_idx, fps, face_cache=None):
-    """Apply subtle horizontal scale (expand/squeeze) to chest region for natural breathing effect."""
+    """Chest-only breathing: expand/squeeze only the center (ribs); shoulders stay fixed (no zoom look)."""
     if BREATH_SCALE_AMPLITUDE <= 0:
         return frame
     h, w = frame.shape[:2]
-    # Chest region: lower part of image (below head/face) - tune CHEST_TOP_FRAC if needed
     y1 = int(h * CHEST_TOP_FRAC)
     y2 = h
     chest_h = y2 - y1
     if chest_h < 10:
         return frame
-    # Slow sine: one breath cycle (inhale/exhale) every BREATH_PERIOD_SEC
+    # Center band = ribs/sternum; left/right = shoulders (we leave these unchanged)
+    center_frac = max(0.3, min(0.7, CHEST_CENTER_WIDTH_FRAC))
+    x0 = int(w * (1 - center_frac) / 2)
+    x1 = int(w * (1 + center_frac) / 2)
+    center_w = x1 - x0
+    if center_w < 10:
+        return frame
     phase = 2.0 * np.pi * frame_idx / (fps * BREATH_PERIOD_SEC)
-    # Horizontal scale: expand on inhale (scale_x > 1), contract on exhale (scale_x < 1)
     scale_x = 1.0 + BREATH_SCALE_AMPLITUDE * np.sin(phase)
-    W_new = max(10, int(w * scale_x))
-    chest_strip = frame[y1:y2, :].copy()
-    # Scale chest horizontally (width changes, height stays same)
-    chest_scaled = cv2.resize(chest_strip, (W_new, chest_h))
-    # Center the scaled chest horizontally; crop/expand to fit original width
+    W_new = max(5, int(center_w * scale_x))
+    # Scale only the center strip (chest), not the full width
+    center_strip = frame[y1:y2, x0:x1].copy()
+    center_scaled = cv2.resize(center_strip, (W_new, chest_h))
+    # Fit scaled center back to center_w (crop or pad)
     result = frame.copy()
-    if W_new > w:
-        # Expanded: crop center portion
-        start_x = (W_new - w) // 2
-        chest_fitted = chest_scaled[:, start_x:start_x + w]
+    if W_new >= center_w:
+        start_x = (W_new - center_w) // 2
+        center_fitted = center_scaled[:, start_x:start_x + center_w]
     else:
-        # Contracted: pad left/right to fit
-        pad_left = (w - W_new) // 2
-        pad_right = w - W_new - pad_left
-        chest_fitted = np.pad(chest_scaled, ((0, 0), (pad_left, pad_right), (0, 0)), mode='edge')
-    # Feather top edge of chest region to blend smoothly with upper body/head
-    feather = min(25, chest_h // 3)
-    mask = np.ones((chest_h, w), dtype=np.float32)
-    for i in range(feather):
-        alpha = i / max(feather, 1)
+        pad_l = (center_w - W_new) // 2
+        pad_r = center_w - W_new - pad_l
+        center_fitted = np.pad(center_scaled, ((0, 0), (pad_l, pad_r), (0, 0)), mode='edge')
+    # Horizontal feather: full strength in middle, blend to 0 at left/right so shoulders don't move
+    # Reduced feathering so effect is more visible
+    feather_x = min(12, center_w // 6)
+    mask = np.ones((chest_h, center_w), dtype=np.float32)
+    for i in range(feather_x):
+        t = i / max(feather_x, 1)
+        if i < center_w:
+            mask[:, i] *= t
+            mask[:, center_w - 1 - i] *= t
+    # Vertical feather at top of chest so it blends with torso above (reduced)
+    feather_y = min(15, chest_h // 4)
+    for i in range(feather_y):
         if i < chest_h:
-            mask[i, :] *= alpha
+            mask[i, :] *= i / max(feather_y, 1)
     mask_3d = np.stack([mask] * 3, axis=2)
-    # Blend chest region with feathered top edge
-    region = result[y1:y2, :].astype(np.float32)
-    blended = (region * (1 - mask_3d) + chest_fitted.astype(np.float32) * mask_3d).astype(np.uint8)
-    result[y1:y2, :] = blended
+    region = result[y1:y2, x0:x1].astype(np.float32)
+    blended = (region * (1 - mask_3d) + center_fitted.astype(np.float32) * mask_3d).astype(np.uint8)
+    result[y1:y2, x0:x1] = blended
     return result
 
 
