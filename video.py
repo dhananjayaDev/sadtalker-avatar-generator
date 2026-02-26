@@ -28,12 +28,46 @@ Usage
 """
 
 import os, sys, pickle, asyncio, argparse, random, subprocess, time, threading
+import shutil
 from datetime import datetime
 import cv2
 import numpy as np
 import torch
 import edge_tts
 from pydub import AudioSegment
+
+
+def _ensure_ffmpeg_on_path():
+    """If ffmpeg is not on PATH, try to find it (e.g. WinGet) and prepend to PATH so pydub works."""
+    if shutil.which("ffmpeg"):
+        return
+    bin_dir = None
+    if os.environ.get("FFMPEG_PATH"):
+        p = os.environ.get("FFMPEG_PATH").strip().rstrip(os.sep)
+        if p.lower().endswith("ffmpeg.exe"):
+            bin_dir = os.path.dirname(p)
+        elif os.path.isfile(os.path.join(p, "ffmpeg.exe")):
+            bin_dir = p
+        elif os.path.isdir(p):
+            bin_dir = p
+    if not bin_dir and sys.platform == "win32":
+        win_get = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages")
+        if os.path.isdir(win_get):
+            for name in os.listdir(win_get):
+                if "FFmpeg" not in name and "ffmpeg" not in name.lower():
+                    continue
+                root = os.path.join(win_get, name)
+                for dirpath, _, filenames in os.walk(root):
+                    if "ffmpeg.exe" in filenames:
+                        bin_dir = dirpath
+                        break
+                if bin_dir:
+                    break
+    if bin_dir and os.path.isfile(os.path.join(bin_dir, "ffmpeg.exe")):
+        os.environ["PATH"] = os.path.abspath(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
+_ensure_ffmpeg_on_path()
 
 # ── numpy 2.x compat ─────────────────────────────────────────────────────────
 if not hasattr(np, 'float'):  np.float = float
@@ -989,7 +1023,7 @@ def _avatar_thread(video_path, voice):
 
 def build_ui():
     import gradio as gr
-    DEFAULT_VIDEO = os.path.join(BASE_DIR, "Video04.mp4")
+    DEFAULT_VIDEO = os.path.join(BASE_DIR, "avatar-2.mp4")
 
     # Start TTS worker thread (handles audio generation, never blocks avatar)
     tw = threading.Thread(target=_tts_worker, daemon=True)
@@ -1063,7 +1097,7 @@ def build_ui():
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description="Real-time video lip-sync")
-    ap.add_argument('--video',  default='Video04.mp4')
+    ap.add_argument('--video',  default='avatar-2.mp4')
     ap.add_argument('--text',   default='Hello, this is a real-time lip-sync test!')
     ap.add_argument('--voice',  default='en-US-JennyNeural')
     ap.add_argument('--save',   default='', help='Also save result to this .mp4 path')
